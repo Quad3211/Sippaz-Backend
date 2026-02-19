@@ -123,7 +123,7 @@ const pool = mysql.createPool({
     console.log("✓ Database tables ready");
     conn.release();
   } catch (err) {
-    console.error("✗ Database error:", err.message);
+    console.error("✗ Database error detailed:", err);
     process.exit(1);
   }
 })();

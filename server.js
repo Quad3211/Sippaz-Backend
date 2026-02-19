@@ -63,14 +63,21 @@ app.use((req, res, next) => {
 // ============================================
 // DATABASE CONNECTION
 // ============================================
-const pool = mysql.createPool({
-  host: DB_HOST,
-  user: DB_USER,
-  password: DB_PASSWORD,
-  database: DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-});
+const pool = process.env.DATABASE_URL
+  ? mysql.createPool({
+      uri: process.env.DATABASE_URL,
+      waitForConnections: true,
+      connectionLimit: 10,
+    })
+  : mysql.createPool({
+      host: DB_HOST,
+      user: DB_USER,
+      password: DB_PASSWORD,
+      database: DB_NAME,
+      port: process.env.DB_PORT || 3306,
+      waitForConnections: true,
+      connectionLimit: 10,
+    });
 
 // Initialize database
 (async () => {

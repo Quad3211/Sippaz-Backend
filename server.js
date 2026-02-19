@@ -13,6 +13,22 @@ require("dotenv").config();
 const app = express();
 
 // ============================================
+// DEBUG LOGGING
+// ============================================
+console.log("--- DEBUG: ENVIRONMENT CONFIG ---");
+console.log(
+  "DATABASE_URL:",
+  process.env.DATABASE_URL
+    ? "[SET (starts with " + process.env.DATABASE_URL.substring(0, 10) + "...)]"
+    : "[NOT SET]",
+);
+console.log("DB_HOST:", process.env.DB_HOST || "[NOT SET]");
+console.log("DB_USER:", process.env.DB_USER || "[NOT SET]");
+console.log("DB_NAME:", process.env.DB_NAME || "[NOT SET]");
+console.log("DB_PORT:", process.env.DB_PORT || "[NOT SET]");
+console.log("---------------------------------");
+
+// ============================================
 // ENVIRONMENT VARIABLES
 // ============================================
 const {

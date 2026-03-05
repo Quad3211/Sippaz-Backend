@@ -1,27 +1,18 @@
-// backend/server.js - FIXED VERSION with is_alcoholic support
+// backend/server.js — Entry point for the Sippaz Vibez REST API
+// Routes are now modularized into api/routes/ for cleaner separation of concerns
+
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2/promise");
-const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
-const Joi = require("joi");
-const paypal = require("./paypal-api");
 require("dotenv").config();
 
 const app = express();
 
 // ============================================
-// DEBUG LOGGING
+// DEBUG LOGGING (startup only)
 // ============================================
 console.log("--- DEBUG: ENVIRONMENT CONFIG ---");
-console.log(
-  "DATABASE_URL:",
-  process.env.DATABASE_URL
-    ? "[SET (starts with " + process.env.DATABASE_URL.substring(0, 10) + "...)]"
-    : "[NOT SET]",
-);
 console.log("DB_HOST:", process.env.DB_HOST || "[NOT SET]");
 console.log("DB_USER:", process.env.DB_USER || "[NOT SET]");
 console.log("DB_NAME:", process.env.DB_NAME || "[NOT SET]");
@@ -31,19 +22,12 @@ console.log("---------------------------------");
 // ============================================
 // ENVIRONMENT VARIABLES
 // ============================================
-const {
-  DB_HOST,
-  DB_USER,
-  DB_PASSWORD,
-  DB_NAME,
-  JWT_SECRET,
-  PORT = 3000,
-} = process.env;
-const SALT_ROUNDS = 10;
+const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, PORT = 3000 } = process.env;
 
 // ============================================
-// SECURITY & MIDDLEWARE
+// SECURITY MIDDLEWARE
 // ============================================
+// Helmet sets secure HTTP headers
 app.use(
   helmet({
     contentSecurityPolicy: false,
@@ -51,19 +35,16 @@ app.use(
   }),
 );
 
+// CORS — restrict allowed origins to known frontend URLs
 app.use(
   cors({
     origin: function (origin, callback) {
       const allowedOrigins = [
         "http://localhost:4200",
         "http://localhost:3000",
-        process.env.FRONTEND_URL, // Add production URL
+        process.env.FRONTEND_URL, // Production frontend URL from .env
       ];
-
-      // Allow requests with no origin (like mobile apps or curl requests)
-      if (!origin) return callback(null, true);
-
-      if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+      if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
         console.log("Blocked by CORS:", origin);
@@ -76,24 +57,18 @@ app.use(
   }),
 );
 
+// Body parsers — limit to 10mb to prevent oversized payloads
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-// Rate limiting
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { message: "Too many attempts, please try again later." },
-});
-
-// Logging
+// Request logging middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
   next();
 });
 
 // ============================================
-// DATABASE CONNECTION
+// DATABASE CONNECTION POOL
 // ============================================
 const pool = process.env.DATABASE_URL
   ? mysql.createPool({
@@ -111,13 +86,18 @@ const pool = process.env.DATABASE_URL
       connectionLimit: 10,
     });
 
-// Initialize database
+// Make pool available to all route handlers via app.locals
+app.locals.pool = pool;
+
+// ============================================
+// DATABASE INITIALIZATION
+// ============================================
 (async () => {
   try {
     const conn = await pool.getConnection();
     console.log("✓ Database connected");
 
-    // Simple users table (no login_attempts)
+    // Users table — stores accounts; passwords are bcrypt-hashed
     await conn.query(`
       CREATE TABLE IF NOT EXISTS users (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -129,7 +109,7 @@ const pool = process.env.DATABASE_URL
       )
     `);
 
-    // Items table with is_alcoholic field
+    // Items table — the product catalogue
     await conn.query(`
       CREATE TABLE IF NOT EXISTS items (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -145,6 +125,7 @@ const pool = process.env.DATABASE_URL
       )
     `);
 
+    // Orders table — links users to items, with FK and payment fields
     await conn.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -152,7 +133,10 @@ const pool = process.env.DATABASE_URL
         item_id INT NOT NULL,
         quantity INT NOT NULL,
         status VARCHAR(50) DEFAULT 'ordered',
+        payment_status VARCHAR(50) DEFAULT 'pending',
         total_price DECIMAL(10,2) NOT NULL,
+        paypal_order_id VARCHAR(255),
+        capture_id VARCHAR(255),
         ordered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE,
         INDEX idx_user_id (user_id)
@@ -162,101 +146,19 @@ const pool = process.env.DATABASE_URL
     console.log("✓ Database tables ready");
     conn.release();
   } catch (err) {
-    console.error("✗ Database error detailed:", err);
+    console.error("✗ Database init error:", err);
     process.exit(1);
   }
 })();
 
 // ============================================
-// VALIDATION SCHEMAS
+// ROUTE MODULES
 // ============================================
-const schemas = {
-  register: Joi.object({
-    email: Joi.string().email().lowercase().trim().required(),
-    password: Joi.string().min(6).max(128).required(),
-  }),
-  login: Joi.object({
-    email: Joi.string().email().lowercase().trim().required(),
-    password: Joi.string().required(),
-  }),
-  item: Joi.object({
-    name: Joi.string().min(3).max(100).trim().required(),
-    description: Joi.string().max(500).allow("").optional(),
-    price: Joi.number().min(0).max(10000).required(),
-    quantity: Joi.number().integer().min(0).max(10000).required(),
-    imageUrl: Joi.string().max(5000000).allow("").optional(),
-    isActive: Joi.boolean().default(true),
-    isAlcoholic: Joi.boolean().default(false),
-  }),
-  order: Joi.object({
-    itemId: Joi.number().integer().positive().required(),
-    quantity: Joi.number().integer().min(1).max(100).required(),
-  }),
-};
+const authRoutes = require("./api/routes/auth.routes");
+const itemsRoutes = require("./api/routes/items.routes");
+const ordersRoutes = require("./api/routes/orders.routes");
 
-const validate = (schema) => (req, res, next) => {
-  const { error, value } = schema.validate(req.body, {
-    abortEarly: false,
-    stripUnknown: true,
-  });
-  if (error) {
-    return res.status(400).json({
-      success: false,
-      message: "Validation error",
-      errors: error.details.map((d) => d.message),
-    });
-  }
-  req.body = value;
-  next();
-};
-
-// ============================================
-// AUTHENTICATION MIDDLEWARE
-// ============================================
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-
-  if (!token) {
-    return res.status(401).json({ message: "Authentication required" });
-  }
-
-  try {
-    const user = jwt.verify(token, JWT_SECRET);
-    req.user = user;
-    next();
-  } catch (err) {
-    return res.status(403).json({ message: "Invalid or expired token" });
-  }
-};
-
-// Optional authentication (doesn't fail if no token)
-const optionalAuth = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-
-  if (token) {
-    try {
-      const user = jwt.verify(token, JWT_SECRET);
-      req.user = user;
-    } catch (err) {
-      // Ignore invalid tokens for optional auth
-    }
-  }
-  next();
-};
-
-const isAdmin = (req, res, next) => {
-  if (req.user?.role === "admin") {
-    next();
-  } else {
-    res.status(403).json({ message: "Admin access required" });
-  }
-};
-
-// ============================================
-// HEALTH CHECK
-// ============================================
+// Health check endpoint
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
@@ -266,493 +168,24 @@ app.get("/health", async (req, res) => {
   }
 });
 
-// ============================================
-// AUTH ROUTES - SIMPLIFIED
-// ============================================
-app.post(
-  "/auth/register",
-  authLimiter,
-  validate(schemas.register),
-  async (req, res) => {
-    const { email, password } = req.body;
+// Mount routers at their base paths
+app.use("/auth", authRoutes);
+app.use("/items", itemsRoutes);
+app.use("/orders", ordersRoutes);
 
-    try {
-      console.log("Registration attempt:", email);
-
-      const [existing] = await pool.query(
-        "SELECT id FROM users WHERE email = ?",
-        [email],
-      );
-
-      if (existing.length) {
-        return res.status(400).json({
-          success: false,
-          message: "Email already registered",
-        });
-      }
-
-      const hashed = await bcrypt.hash(password, SALT_ROUNDS);
-
-      const [result] = await pool.query(
-        "INSERT INTO users (email, password, role) VALUES (?, ?, ?)",
-        [email, hashed, "customer"],
-      );
-
-      const userResponse = { id: result.insertId, email, role: "customer" };
-      const token = jwt.sign(userResponse, JWT_SECRET, { expiresIn: "7d" });
-
-      console.log("✓ User registered:", email);
-
-      res.json({ success: true, user: userResponse, token });
-    } catch (error) {
-      console.error("Registration error:", error);
-      res.status(500).json({ success: false, message: "Registration failed" });
-    }
-  },
-);
-
-app.post(
-  "/auth/login",
-  authLimiter,
-  validate(schemas.login),
-  async (req, res) => {
-    const { email, password } = req.body;
-
-    try {
-      console.log("Login attempt:", email);
-
-      const [users] = await pool.query("SELECT * FROM users WHERE email = ?", [
-        email,
-      ]);
-
-      if (!users.length) {
-        console.log("User not found:", email);
-        return res
-          .status(401)
-          .json({ success: false, message: "Invalid email or password" });
-      }
-
-      const user = users[0];
-      const valid = await bcrypt.compare(password, user.password);
-
-      if (!valid) {
-        console.log("Invalid password for:", email);
-        return res
-          .status(401)
-          .json({ success: false, message: "Invalid email or password" });
-      }
-
-      const userResponse = { id: user.id, email: user.email, role: user.role };
-      const token = jwt.sign(userResponse, JWT_SECRET, { expiresIn: "7d" });
-
-      console.log("✓ User logged in:", email);
-
-      res.json({ success: true, user: userResponse, token });
-    } catch (error) {
-      console.error("Login error:", error);
-      res.status(500).json({ success: false, message: "Login failed" });
-    }
-  },
-);
+// Admin endpoints re-mapped from router internal paths
+app.use("/admin/items", itemsRoutes);
+app.use("/admin/orders", ordersRoutes);
 
 // ============================================
-// ITEMS ROUTES - PUBLIC ACCESS
+// GLOBAL ERROR HANDLING
 // ============================================
-app.get("/items", async (req, res) => {
-  try {
-    const [items] = await pool.query(
-      "SELECT id, name, description, price, quantity, image_url, is_alcoholic, created_at FROM items WHERE is_active = true ORDER BY created_at DESC",
-    );
-    res.json(items);
-  } catch (error) {
-    console.error("Error fetching items:", error);
-    res.status(500).json({ message: "Failed to fetch items" });
-  }
-});
-
-app.get("/items/:id", async (req, res) => {
-  try {
-    const [items] = await pool.query("SELECT * FROM items WHERE id = ?", [
-      req.params.id,
-    ]);
-    if (!items.length) {
-      return res.status(404).json({ message: "Item not found" });
-    }
-    res.json(items[0]);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch item" });
-  }
-});
-
-app.get("/admin/items", authenticateToken, isAdmin, async (req, res) => {
-  try {
-    const [items] = await pool.query(
-      "SELECT * FROM items ORDER BY created_at DESC",
-    );
-    res.json(items);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch items" });
-  }
-});
-
-app.post(
-  "/items",
-  authenticateToken,
-  isAdmin,
-  validate(schemas.item),
-  async (req, res) => {
-    const {
-      name,
-      description,
-      price,
-      quantity,
-      imageUrl,
-      isActive,
-      isAlcoholic,
-    } = req.body;
-
-    try {
-      console.log("Creating item with data:", {
-        name,
-        description,
-        price,
-        quantity,
-        imageUrl,
-        isActive,
-        isAlcoholic,
-      });
-
-      const [result] = await pool.query(
-        "INSERT INTO items (name, description, price, quantity, image_url, is_active, is_alcoholic) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [
-          name,
-          description || "",
-          price,
-          quantity,
-          imageUrl || "",
-          isActive !== undefined ? isActive : true,
-          isAlcoholic !== undefined ? isAlcoholic : false,
-        ],
-      );
-
-      console.log("✓ Item created:", name, "- Alcoholic:", isAlcoholic);
-      res.json({
-        success: true,
-        id: result.insertId,
-        message: "Item created successfully",
-      });
-    } catch (error) {
-      console.error("Error creating item:", error);
-      res
-        .status(500)
-        .json({ success: false, message: "Failed to create item" });
-    }
-  },
-);
-
-app.put(
-  "/items/:id",
-  authenticateToken,
-  isAdmin,
-  validate(schemas.item),
-  async (req, res) => {
-    const {
-      name,
-      description,
-      price,
-      quantity,
-      imageUrl,
-      isActive,
-      isAlcoholic,
-    } = req.body;
-
-    try {
-      console.log("Updating item with data:", {
-        id: req.params.id,
-        name,
-        description,
-        price,
-        quantity,
-        imageUrl,
-        isActive,
-        isAlcoholic,
-      });
-
-      const [result] = await pool.query(
-        "UPDATE items SET name = ?, description = ?, price = ?, quantity = ?, image_url = ?, is_active = ?, is_alcoholic = ? WHERE id = ?",
-        [
-          name,
-          description || "",
-          price,
-          quantity,
-          imageUrl || "",
-          isActive !== undefined ? isActive : true,
-          isAlcoholic !== undefined ? isAlcoholic : false,
-          req.params.id,
-        ],
-      );
-
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "Item not found" });
-      }
-
-      console.log("✓ Item updated:", name, "- Alcoholic:", isAlcoholic);
-      res.json({ success: true, message: "Item updated successfully" });
-    } catch (error) {
-      console.error("Error updating item:", error);
-      res
-        .status(500)
-        .json({ success: false, message: "Failed to update item" });
-    }
-  },
-);
-
-app.delete("/items/:id", authenticateToken, isAdmin, async (req, res) => {
-  try {
-    const [result] = await pool.query("DELETE FROM items WHERE id = ?", [
-      req.params.id,
-    ]);
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Item not found" });
-    }
-    res.json({ success: true, message: "Item deleted successfully" });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to delete item" });
-  }
-});
-
-// ============================================
-// ORDERS ROUTES - OPTIONAL AUTH
-// ============================================
-app.post("/orders", optionalAuth, validate(schemas.order), async (req, res) => {
-  const { itemId, quantity } = req.body;
-  const userId = req.user?.id || null; // null for guest orders
-
-  const connection = await pool.getConnection();
-
-  try {
-    await connection.beginTransaction();
-
-    const [items] = await connection.query(
-      "SELECT * FROM items WHERE id = ? FOR UPDATE",
-      [itemId],
-    );
-
-    if (!items.length) {
-      await connection.rollback();
-      return res.status(404).json({ message: "Item not found" });
-    }
-
-    const item = items[0];
-
-    if (item.quantity < quantity) {
-      await connection.rollback();
-      return res.status(400).json({
-        message: `Insufficient stock. Only ${item.quantity} available.`,
-      });
-    }
-
-    const totalPrice = item.price * quantity;
-
-    const [orderResult] = await connection.query(
-      "INSERT INTO orders (user_id, item_id, quantity, total_price, status, payment_status) VALUES (?, ?, ?, ?, ?, ?)",
-      [userId, itemId, quantity, totalPrice, "pending_payment", "pending"],
-    );
-
-    await connection.query(
-      "UPDATE items SET quantity = quantity - ? WHERE id = ?",
-      [quantity, itemId],
-    );
-
-    await connection.commit();
-
-    console.log(
-      `✓ Order created: Order #${orderResult.insertId}${userId ? ` by User #${userId}` : " (guest)"}`,
-    );
-
-    res.json({
-      success: true,
-      orderId: orderResult.insertId,
-      message: "Order placed successfully",
-    });
-  } catch (error) {
-    await connection.rollback();
-    console.error("Error creating order:", error);
-    res.status(500).json({ success: false, message: "Failed to place order" });
-  } finally {
-    connection.release();
-  }
-});
-
-// Get orders - shows user's orders if logged in, or all guest orders if not
-app.get("/orders/mine", optionalAuth, async (req, res) => {
-  try {
-    let query, params;
-
-    if (req.user?.id) {
-      // Logged in user - show their orders
-      query = `
-        SELECT orders.*, items.name as item_name, items.image_url, items.price as item_price
-        FROM orders
-        JOIN items ON orders.item_id = items.id
-        WHERE orders.user_id = ?
-        ORDER BY orders.ordered_at DESC
-      `;
-      params = [req.user.id];
-    } else {
-      // Guest - show recent guest orders (last 50)
-      query = `
-        SELECT orders.*, items.name as item_name, items.image_url, items.price as item_price
-        FROM orders
-        JOIN items ON orders.item_id = items.id
-        WHERE orders.user_id IS NULL
-        ORDER BY orders.ordered_at DESC
-        LIMIT 50
-      `;
-      params = [];
-    }
-
-    const [orders] = await pool.query(query, params);
-    res.json(orders);
-  } catch (error) {
-    console.error("Error fetching orders:", error);
-    res.status(500).json({ message: "Failed to fetch orders" });
-  }
-});
-
-app.get("/admin/orders", authenticateToken, isAdmin, async (req, res) => {
-  try {
-    const [orders] = await pool.query(`
-      SELECT orders.*, users.email as user_email, items.name as item_name, items.image_url, items.price as item_price
-      FROM orders
-      LEFT JOIN users ON orders.user_id = users.id
-      JOIN items ON orders.item_id = items.id
-      ORDER BY orders.ordered_at DESC
-    `);
-    res.json(orders);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch orders" });
-  }
-});
-
-app.put("/orders/:id/status", authenticateToken, isAdmin, async (req, res) => {
-  const { status } = req.body;
-
-  if (!["ordered", "fulfilled", "cancelled"].includes(status)) {
-    return res.status(400).json({ message: "Invalid status" });
-  }
-
-  try {
-    const [result] = await pool.query(
-      "UPDATE orders SET status = ? WHERE id = ?",
-      [status, req.params.id],
-    );
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Order not found" });
-    }
-
-    res.json({ success: true, message: "Order status updated" });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ success: false, message: "Failed to update order status" });
-  }
-});
-
-// ============================================
-// PAYPAL ROUTES
-// ============================================
-
-app.post("/orders/:id/create-paypal-order", optionalAuth, async (req, res) => {
-  const orderId = req.params.id;
-  try {
-    // 1. Get the order from DB to verify amount and existence
-    const [orders] = await pool.query(
-      "SELECT total_price FROM orders WHERE id = ?",
-      [orderId],
-    );
-
-    if (!orders.length) {
-      return res.status(404).json({ message: "Order not found" });
-    }
-
-    const order = orders[0];
-
-    // 2. Call PayPal to create the order
-    const { jsonResponse, httpStatusCode } = await paypal.createOrder(
-      "USD",
-      order.total_price,
-    );
-
-    if (httpStatusCode !== 201) {
-      console.error("Failed to create PayPal order:", jsonResponse);
-      return res.status(500).json({ message: "Failed to create PayPal order" });
-    }
-
-    // 3. Save PayPal Order ID to DB
-    await pool.query("UPDATE orders SET paypal_order_id = ? WHERE id = ?", [
-      jsonResponse.id,
-      orderId,
-    ]);
-
-    res.status(201).json(jsonResponse);
-  } catch (error) {
-    console.error("Error creating PayPal order:", error);
-    res.status(500).json({ message: "Failed to initiate PayPal checkout" });
-  }
-});
-
-app.post("/orders/:id/capture-paypal-order", optionalAuth, async (req, res) => {
-  const orderId = req.params.id;
-  try {
-    // 1. Get order to find the paypal_order_id
-    const [orders] = await pool.query(
-      "SELECT paypal_order_id FROM orders WHERE id = ?",
-      [orderId],
-    );
-
-    if (!orders.length || !orders[0].paypal_order_id) {
-      return res
-        .status(404)
-        .json({ message: "Order or PayPal transaction not found" });
-    }
-
-    const { paypal_order_id } = orders[0];
-
-    // 2. Capture the payment
-    const { jsonResponse, httpStatusCode } =
-      await paypal.capturePayment(paypal_order_id);
-
-    if (httpStatusCode !== 201) {
-      console.error("Failed to capture PayPal order:", jsonResponse);
-      return res.status(500).json({ message: "Failed to capture payment" });
-    }
-
-    // 3. Update Order in DB
-    await pool.query(
-      "UPDATE orders SET status = ?, payment_status = ?, capture_id = ? WHERE id = ?",
-      [
-        "ordered",
-        "completed",
-        jsonResponse.purchase_units[0].payments.captures[0].id,
-        orderId,
-      ],
-    );
-
-    res.json(jsonResponse);
-  } catch (error) {
-    console.error("Error capturing PayPal order:", error);
-    res.status(500).json({ message: "Failed to capture payment" });
-  }
-});
-
-// ============================================
-// ERROR HANDLING
-// ============================================
+// 404 — unknown route
 app.use((req, res) => res.status(404).json({ message: "Endpoint not found" }));
+
+// 500 — unhandled errors (try/catch in routes handle most cases)
 app.use((err, req, res, next) => {
-  console.error("Error:", err);
+  console.error("Unhandled error:", err);
   res.status(500).json({ message: "Internal server error" });
 });
 
@@ -763,7 +196,7 @@ app.listen(PORT, () => {
   console.log("=".repeat(50));
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📡 API: http://localhost:${PORT}`);
-  console.log(`🔓 Store & Orders: Public access (no login required)`);
-  console.log(`🔐 Admin: Login required`);
+  console.log(`🔓 Store & Orders: Public access`);
+  console.log(`🔐 Admin routes: JWT required`);
   console.log("=".repeat(50));
 });

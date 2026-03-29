@@ -293,9 +293,10 @@ app.post(
     const { email, password } = req.body;
 
     try {
-      const [users] = await getPool().query("SELECT * FROM users WHERE email = ?", [
-        email,
-      ]);
+      const [users] = await getPool().query(
+        "SELECT * FROM users WHERE email = ?",
+        [email],
+      );
 
       if (!users.length) {
         return res
@@ -527,30 +528,19 @@ app.post("/orders", optionalAuth, validate(schemas.order), async (req, res) => {
 
 app.get("/orders/mine", optionalAuth, async (req, res) => {
   try {
-    let query, params;
-
-    if (req.user?.id) {
-      query = `
-        SELECT orders.*, items.name as item_name, items.image_url, items.price as item_price
-        FROM orders
-        JOIN items ON orders.item_id = items.id
-        WHERE orders.user_id = ?
-        ORDER BY orders.ordered_at DESC
-      `;
-      params = [req.user.id];
-    } else {
-      query = `
-        SELECT orders.*, items.name as item_name, items.image_url, items.price as item_price
-        FROM orders
-        JOIN items ON orders.item_id = items.id
-        WHERE orders.user_id IS NULL
-        ORDER BY orders.ordered_at DESC
-        LIMIT 50
-      `;
-      params = [];
+    if (!req.user?.id) {
+      // No authenticated session — return empty list to protect other guests' data
+      return res.json([]);
     }
 
-    const [orders] = await getPool().query(query, params);
+    const query = `
+      SELECT orders.*, items.name as item_name, items.image_url, items.price as item_price
+      FROM orders
+      JOIN items ON orders.item_id = items.id
+      WHERE orders.user_id = ?
+      ORDER BY orders.ordered_at DESC
+    `;
+    const [orders] = await getPool().query(query, [req.user.id]);
     res.json(orders);
   } catch (error) {
     console.error("Error fetching orders:", error);
@@ -565,7 +555,7 @@ app.get("/orders/:id", optionalAuth, async (req, res) => {
        FROM orders
        JOIN items ON orders.item_id = items.id
        WHERE orders.id = ?`,
-      [req.params.id]
+      [req.params.id],
     );
 
     if (!orders.length) {
@@ -591,6 +581,116 @@ app.get("/admin/orders", authenticateToken, isAdmin, async (req, res) => {
     res.json(orders);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch orders" });
+  }
+});
+
+// Update order quantity (customer)
+app.put("/orders/:id", optionalAuth, async (req, res) => {
+  const { quantity } = req.body;
+  if (!quantity || quantity < 1) {
+    return res.status(400).json({ message: "Quantity must be at least 1" });
+  }
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [orders] = await connection.query(
+      `SELECT orders.*, items.price, items.quantity as stock_qty
+       FROM orders JOIN items ON orders.item_id = items.id
+       WHERE orders.id = ?`,
+      [req.params.id],
+    );
+    if (!orders.length) {
+      await connection.rollback();
+      return res.status(404).json({ message: "Order not found" });
+    }
+    const order = orders[0];
+    if (!["pending_payment", "ordered"].includes(order.status)) {
+      await connection.rollback();
+      return res
+        .status(400)
+        .json({ message: "Cannot update a fulfilled or cancelled order" });
+    }
+    const qtyDiff = quantity - order.quantity;
+    if (qtyDiff > 0 && order.stock_qty < qtyDiff) {
+      await connection.rollback();
+      return res.status(400).json({ message: `Insufficient stock.` });
+    }
+    await connection.query(
+      "UPDATE orders SET quantity = ?, total_price = ? WHERE id = ?",
+      [quantity, order.price * quantity, req.params.id],
+    );
+    if (qtyDiff !== 0) {
+      await connection.query(
+        "UPDATE items SET quantity = quantity - ? WHERE id = ?",
+        [qtyDiff, order.item_id],
+      );
+    }
+    await connection.commit();
+    res.json({ success: true, message: "Order quantity updated" });
+  } catch (error) {
+    await connection.rollback();
+    res.status(500).json({ success: false, message: "Failed to update order" });
+  } finally {
+    connection.release();
+  }
+});
+
+// Cancel order (restores stock atomically)
+app.post("/orders/:id/cancel", optionalAuth, async (req, res) => {
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [orders] = await connection.query(
+      "SELECT * FROM orders WHERE id = ? FOR UPDATE",
+      [req.params.id],
+    );
+    if (!orders.length) {
+      await connection.rollback();
+      return res.status(404).json({ message: "Order not found" });
+    }
+    const order = orders[0];
+    if (order.status === "cancelled") {
+      await connection.rollback();
+      return res.status(400).json({ message: "Order already cancelled" });
+    }
+    if (order.status === "fulfilled") {
+      await connection.rollback();
+      return res
+        .status(400)
+        .json({ message: "Cannot cancel a fulfilled order" });
+    }
+    await connection.query(
+      "UPDATE orders SET status = 'cancelled' WHERE id = ?",
+      [req.params.id],
+    );
+    await connection.query(
+      "UPDATE items SET quantity = quantity + ? WHERE id = ?",
+      [order.quantity, order.item_id],
+    );
+    await connection.commit();
+    res.json({ success: true, message: "Order cancelled and stock restored" });
+  } catch (error) {
+    await connection.rollback();
+    res.status(500).json({ success: false, message: "Failed to cancel order" });
+  } finally {
+    connection.release();
+  }
+});
+
+// Track order status
+app.get("/orders/:id/track", optionalAuth, async (req, res) => {
+  try {
+    const [orders] = await getPool().query(
+      `SELECT orders.id, orders.status, orders.ordered_at, orders.quantity,
+              orders.total_price, orders.payment_status, items.name as item_name, items.image_url
+       FROM orders JOIN items ON orders.item_id = items.id WHERE orders.id = ?`,
+      [req.params.id],
+    );
+    if (!orders.length)
+      return res.status(404).json({ message: "Order not found" });
+    res.json(orders[0]);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to track order" });
   }
 });
 
@@ -646,10 +746,10 @@ app.post("/orders/:id/create-paypal-order", optionalAuth, async (req, res) => {
       return res.status(500).json({ message: "Failed to create PayPal order" });
     }
 
-    await getPool().query("UPDATE orders SET paypal_order_id = ? WHERE id = ?", [
-      jsonResponse.id,
-      orderId,
-    ]);
+    await getPool().query(
+      "UPDATE orders SET paypal_order_id = ? WHERE id = ?",
+      [jsonResponse.id, orderId],
+    );
 
     res.status(201).json(jsonResponse);
   } catch (error) {

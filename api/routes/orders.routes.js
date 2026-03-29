@@ -38,11 +38,9 @@ router.post("/", optionalAuth, validate(schemas.order), async (req, res) => {
     const item = items[0];
     if (item.quantity < quantity) {
       await connection.rollback();
-      return res
-        .status(400)
-        .json({
-          message: `Insufficient stock. Only ${item.quantity} available.`,
-        });
+      return res.status(400).json({
+        message: `Insufficient stock. Only ${item.quantity} available.`,
+      });
     }
 
     const totalPrice = item.price * quantity;
@@ -77,37 +75,25 @@ router.post("/", optionalAuth, validate(schemas.order), async (req, res) => {
 
 /**
  * GET /orders/mine
- * Returns the authenticated user's orders, or recent guest orders if not logged in.
+ * Returns the authenticated user's orders. Guest (unauthenticated) users
+ * receive an empty array — we cannot verify guest identity without sessions.
  */
 router.get("/mine", optionalAuth, async (req, res) => {
   const pool = req.app.locals.pool;
   try {
-    let query, params;
-
-    if (req.user?.id) {
-      // Logged-in user — return their specific orders
-      query = `
-        SELECT orders.*, items.name as item_name, items.image_url, items.price as item_price
-        FROM orders
-        JOIN items ON orders.item_id = items.id
-        WHERE orders.user_id = ?
-        ORDER BY orders.ordered_at DESC
-      `;
-      params = [req.user.id];
-    } else {
-      // Guest — return last 50 guest orders
-      query = `
-        SELECT orders.*, items.name as item_name, items.image_url, items.price as item_price
-        FROM orders
-        JOIN items ON orders.item_id = items.id
-        WHERE orders.user_id IS NULL
-        ORDER BY orders.ordered_at DESC
-        LIMIT 50
-      `;
-      params = [];
+    if (!req.user?.id) {
+      // No authenticated session — return empty list to protect other guests' data
+      return res.json([]);
     }
 
-    const [orders] = await pool.query(query, params);
+    const query = `
+      SELECT orders.*, items.name as item_name, items.image_url, items.price as item_price
+      FROM orders
+      JOIN items ON orders.item_id = items.id
+      WHERE orders.user_id = ?
+      ORDER BY orders.ordered_at DESC
+    `;
+    const [orders] = await pool.query(query, [req.user.id]);
     res.json(orders);
   } catch (error) {
     console.error("Error fetching orders:", error);
@@ -136,8 +122,171 @@ router.get("/admin/all", authenticateToken, isAdmin, async (req, res) => {
 });
 
 /**
- * PUT /orders/:id/status
- * Admin only — updates the status of an order.
+ * PUT /orders/:id
+ * Updates the quantity of a pending order.
+ * Only allowed for orders in 'pending_payment' or 'ordered' status.
+ */
+router.put("/:id", optionalAuth, async (req, res) => {
+  const { quantity } = req.body;
+  const pool = req.app.locals.pool;
+
+  if (!quantity || quantity < 1) {
+    return res.status(400).json({ message: "Quantity must be at least 1" });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // Fetch the existing order
+    const [orders] = await connection.query(
+      `SELECT orders.*, items.price, items.quantity as stock_qty
+       FROM orders
+       JOIN items ON orders.item_id = items.id
+       WHERE orders.id = ?`,
+      [req.params.id],
+    );
+
+    if (!orders.length) {
+      await connection.rollback();
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const order = orders[0];
+
+    if (!["pending_payment", "ordered"].includes(order.status)) {
+      await connection.rollback();
+      return res
+        .status(400)
+        .json({ message: "Cannot update a fulfilled or cancelled order" });
+    }
+
+    const qtyDiff = quantity - order.quantity;
+
+    // Check stock if increasing quantity
+    if (qtyDiff > 0 && order.stock_qty < qtyDiff) {
+      await connection.rollback();
+      return res
+        .status(400)
+        .json({
+          message: `Insufficient stock. Only ${order.stock_qty} additional units available.`,
+        });
+    }
+
+    const newTotal = order.price * quantity;
+
+    await connection.query(
+      "UPDATE orders SET quantity = ?, total_price = ? WHERE id = ?",
+      [quantity, newTotal, req.params.id],
+    );
+
+    // Restore or decrement stock based on quantity change
+    if (qtyDiff !== 0) {
+      await connection.query(
+        "UPDATE items SET quantity = quantity - ? WHERE id = ?",
+        [qtyDiff, order.item_id],
+      );
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: "Order quantity updated" });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error updating order quantity:", error);
+    res.status(500).json({ success: false, message: "Failed to update order" });
+  } finally {
+    connection.release();
+  }
+});
+
+/**
+ * POST /orders/:id/cancel
+ * Cancels a pending order and restores stock atomically.
+ */
+router.post("/:id/cancel", optionalAuth, async (req, res) => {
+  const pool = req.app.locals.pool;
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [orders] = await connection.query(
+      "SELECT * FROM orders WHERE id = ? FOR UPDATE",
+      [req.params.id],
+    );
+
+    if (!orders.length) {
+      await connection.rollback();
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const order = orders[0];
+
+    if (order.status === "cancelled") {
+      await connection.rollback();
+      return res.status(400).json({ message: "Order is already cancelled" });
+    }
+
+    if (order.status === "fulfilled") {
+      await connection.rollback();
+      return res
+        .status(400)
+        .json({ message: "Cannot cancel a fulfilled order" });
+    }
+
+    // Cancel the order
+    await connection.query(
+      "UPDATE orders SET status = 'cancelled' WHERE id = ?",
+      [req.params.id],
+    );
+
+    // Restore the stock
+    await connection.query(
+      "UPDATE items SET quantity = quantity + ? WHERE id = ?",
+      [order.quantity, order.item_id],
+    );
+
+    await connection.commit();
+    res.json({ success: true, message: "Order cancelled and stock restored" });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error cancelling order:", error);
+    res.status(500).json({ success: false, message: "Failed to cancel order" });
+  } finally {
+    connection.release();
+  }
+});
+
+/**
+ * GET /orders/:id/track
+ * Returns tracking/status information for a specific order.
+ */
+router.get("/:id/track", optionalAuth, async (req, res) => {
+  const pool = req.app.locals.pool;
+  try {
+    const [orders] = await pool.query(
+      `SELECT orders.id, orders.status, orders.ordered_at, orders.quantity,
+              orders.total_price, orders.payment_status,
+              items.name as item_name, items.image_url
+       FROM orders
+       JOIN items ON orders.item_id = items.id
+       WHERE orders.id = ?`,
+      [req.params.id],
+    );
+
+    if (!orders.length) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    res.json(orders[0]);
+  } catch (error) {
+    console.error("Error tracking order:", error);
+    res.status(500).json({ message: "Failed to track order" });
+  }
+});
+
+/**
+ * PUT /orders/:id/status (admin only)
  */
 router.put("/:id/status", authenticateToken, isAdmin, async (req, res) => {
   const { status } = req.body;

@@ -10,16 +10,6 @@ require("dotenv").config();
 const app = express();
 
 // ============================================
-// DEBUG LOGGING (startup only)
-// ============================================
-console.log("--- DEBUG: ENVIRONMENT CONFIG ---");
-console.log("DB_HOST:", process.env.DB_HOST || "[NOT SET]");
-console.log("DB_USER:", process.env.DB_USER || "[NOT SET]");
-console.log("DB_NAME:", process.env.DB_NAME || "[NOT SET]");
-console.log("DB_PORT:", process.env.DB_PORT || "[NOT SET]");
-console.log("---------------------------------");
-
-// ============================================
 // ENVIRONMENT VARIABLES
 // ============================================
 const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, PORT = 3000 } = process.env;
@@ -173,9 +163,11 @@ app.use("/auth", authRoutes);
 app.use("/items", itemsRoutes);
 app.use("/orders", ordersRoutes);
 
-// Admin endpoints re-mapped from router internal paths
-app.use("/admin/items", itemsRoutes);
-app.use("/admin/orders", ordersRoutes);
+// Admin routes — served from the same modular routers but require the
+// AdminGuard on the frontend (Angular) and authenticateToken + isAdmin
+// inside each route handler. We do NOT re-mount here to avoid bypassing auth.
+// /admin/items and /admin/orders are declared inside items.routes.js and
+// orders.routes.js respectively (e.g. router.get("/admin/all", ...)).
 
 // ============================================
 // GLOBAL ERROR HANDLING

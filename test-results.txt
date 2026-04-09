@@ -1,0 +1,154 @@
+PASS api/__tests__/health.test.js
+  ● Console
+
+    console.log
+      [dotenv@17.2.3] injecting env (8) from .env -- tip: 🗂️ backup and recover secrets: https://dotenvx.com/ops
+
+      at _log (node_modules/dotenv/lib/main.js:142:11)
+
+    console.log
+      ✓ Database connected
+
+      at log (server.js:88:13)
+
+    console.log
+      ✓ Database tables ready
+
+      at log (server.js:136:13)
+
+    console.log
+      2026-04-09T01:48:26.577Z - GET /health
+
+      at log (server.js:56:11)
+
+    console.log
+      2026-04-09T01:48:26.636Z - GET /non-existent-route-123
+
+      at log (server.js:56:11)
+
+PASS api/__tests__/items.test.js
+  ● Console
+
+    console.log
+      [dotenv@17.2.3] injecting env (8) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+
+      at _log (node_modules/dotenv/lib/main.js:142:11)
+
+    console.log
+      ✓ Database connected
+
+      at log (server.js:88:13)
+
+    console.log
+      ✓ Database tables ready
+
+      at log (server.js:136:13)
+
+    console.log
+      2026-04-09T01:48:27.125Z - GET /items
+
+      at log (server.js:56:11)
+
+    console.log
+      2026-04-09T01:48:27.230Z - POST /items
+
+      at log (server.js:56:11)
+
+    console.log
+      ✓ Item created: New Item
+
+      at log (api/routes/items.routes.js:94:15)
+
+    console.log
+      2026-04-09T01:48:27.272Z - POST /items
+
+      at log (server.js:56:11)
+
+    console.log
+      2026-04-09T01:48:27.292Z - POST /items
+
+      at log (server.js:56:11)
+
+FAIL api/__tests__/auth.test.js
+  ● Console
+
+    console.log
+      [dotenv@17.2.3] injecting env (8) from .env -- tip: 🔄 add secrets lifecycle management: https://dotenvx.com/ops
+
+      at _log (node_modules/dotenv/lib/main.js:142:11)
+
+    console.log
+      ✓ Database connected
+
+      at log (server.js:88:13)
+
+    console.log
+      ✓ Database tables ready
+
+      at log (server.js:136:13)
+
+    console.log
+      2026-04-09T01:48:27.189Z - POST /auth/register
+
+      at log (server.js:56:11)
+
+    console.log
+      Registration attempt: test@example.com
+
+      at log (api/routes/auth.routes.js:34:15)
+
+    console.log
+      ✓ User registered: test@example.com
+
+      at log (api/routes/auth.routes.js:57:15)
+
+    console.log
+      2026-04-09T01:48:27.474Z - POST /auth/login
+
+      at log (server.js:56:11)
+
+    console.log
+      Login attempt: test@example.com
+
+      at log (api/routes/auth.routes.js:79:15)
+
+    console.log
+      ✓ User logged in: test@example.com
+
+      at log (api/routes/auth.routes.js:104:15)
+
+    console.log
+      2026-04-09T01:48:27.504Z - POST /auth/login
+
+      at log (server.js:56:11)
+
+    console.log
+      Login attempt: test@example.com
+
+      at log (api/routes/auth.routes.js:79:15)
+
+  ● Auth API Integration › POST /auth/register should create a new user
+
+    expect(received).toHaveProperty(path, value)
+
+    Expected path: "message"
+    Received path: []
+
+    Expected value: "User registered successfully"
+    Received value: {"success": true, "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJ0ZXN0QGV4YW1wbGUuY29tIiwicm9sZSI6ImN1c3RvbWVyIiwiaWF0IjoxNzc1Njk5MzA3LCJleHAiOjE3NzYzMDQxMDd9.w2XZb2veJ371xqvRBlJf_F1Iqtm6j7kZArvQplqrilg", "user": {"email": "test@example.com", "id": 1, "role": "customer"}}
+
+    [0m [90m 36 |[39m
+     [90m 37 |[39m     expect(res[33m.[39mstatusCode)[33m.[39mtoEqual([35m200[39m)[33m;[39m
+    [31m[1m>[22m[39m[90m 38 |[39m     expect(res[33m.[39mbody)[33m.[39mtoHaveProperty([32m"message"[39m[33m,[39m [32m"User registered successfully"[39m)[33m;[39m
+     [90m    |[39m                      [31m[1m^[22m[39m
+     [90m 39 |[39m     expect(res[33m.[39mbody)[33m.[39mtoHaveProperty([32m"userId"[39m[33m,[39m [35m1[39m)[33m;[39m
+     [90m 40 |[39m   })[33m;[39m
+     [90m 41 |[39m[0m
+
+      at Object.toHaveProperty (api/__tests__/auth.test.js:38:22)
+
+Test Suites: 1 failed, 2 passed, 3 total
+Tests:       1 failed, 8 passed, 9 total
+Snapshots:   0 total
+Time:        5.149 s
+Ran all test suites.

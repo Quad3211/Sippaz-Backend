@@ -184,11 +184,15 @@ app.use((err, req, res, next) => {
 // ============================================
 // START SERVER
 // ============================================
-app.listen(PORT, () => {
-  console.log("=".repeat(50));
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 API: http://localhost:${PORT}`);
-  console.log(`🔓 Store & Orders: Public access`);
-  console.log(`🔐 Admin routes: JWT required`);
-  console.log("=".repeat(50));
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log("=".repeat(50));
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📡 API: http://localhost:${PORT}`);
+    console.log(`🔓 Store & Orders: Public access`);
+    console.log(`🔐 Admin routes: JWT required`);
+    console.log("=".repeat(50));
+  });
+}
+
+module.exports = app;
